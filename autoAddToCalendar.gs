@@ -1,3 +1,6 @@
+// == AUTO ADD TO CALENDAR ==
+// Add this script to Google Apps Script (.gs) file and run `autoAddToCalendar` manually or on a trigger.
+
 function autoAddToCalendar() {
   const USER_TIMEZONE = 'Asia/Kolkata';
   const labelName = "AutoScheduled";
@@ -60,16 +63,16 @@ function autoAddToCalendar() {
   console.log("✅ Script completed");
 }
 
+// == HELPERS ==
 
-// ✅ Create or reuse label
+// 📍 Get or create Gmail label
 function getOrCreateLabel_(name) {
   let label = GmailApp.getUserLabelByName(name);
   if (!label) label = GmailApp.createLabel(name);
   return label;
 }
 
-
-// ✅ Clean subject line
+// 📍 Clean subject line for event title
 function cleanSubject(subject) {
   return subject
     .replace(/^(Re:|Fwd:|Fw:)\s*/i, '')
@@ -78,24 +81,58 @@ function cleanSubject(subject) {
     .substring(0, 100);
 }
 
-
-// ✅ Match date strings
+// 📍 Detect possible date/time strings in email
 function findDates(text) {
-  const dateRegexes = [
-    // July 3 at 5:30 PM
-    /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\s+(?:at\s+)?\d{1,2}:\d{2}\s*(am|pm)?\b/gi,
-
-    // 3rd July 2025 at 5:30 PM
-    /\b\d{1,2}(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\s+(?:at\s+)?\d{1,2}:\d{2}\s*(am|pm)?\b/gi
-  ];
-
   const matches = [];
 
-  for (const regex of dateRegexes) {
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-      const raw = match[0];
+  const lines = text.split('\n').map(line => line.trim().toLowerCase());
+  let pendingDate = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Match: 🗓️ Date: 30-06-2025
+    if (line.match(/^date[:\s🗓️\-]+/i)) {
+      pendingDate = line.replace(/^date[:\s🗓️\-]+/i, '').trim();
+    }
+
+    // Match: 🕕 Time: 6:00 PM – 8:00 PM
+    if (pendingDate && line.match(/^time[:\s🕕\-]+/i)) {
+      let timeLine = line.replace(/^time[:\s🕕\-]+/i, '').trim();
+      // Extract only first time if it's a range
+      const firstTime = timeLine.split(/[–-]/)[0].trim();
+      const combined = `${pendingDate} ${firstTime}`;
+      const parsed = parseDateString(combined);
+      if (parsed.start) matches.push(parsed);
+      pendingDate = null;
+    }
+
+    // Direct match: 30/06/2025 at 6:00 PM
+    const directDT = /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})[ ,]*(\d{1,2}:\d{2}\s*(am|pm)?)/i.exec(line);
+    if (directDT) {
+      const combined = `${directDT[1]} ${directDT[2]}`;
+      const parsed = parseDateString(combined);
+      if (parsed.start) matches.push(parsed);
+    }
+
+    // Format: Jun 30, 2025 6:00 PM India
+    const matchFancy = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+\d{4}.*?\d{1,2}:\d{2}\s*(am|pm)?/gi.exec(line);
+    if (matchFancy) {
+      const raw = matchFancy[0].replace(/india|ist|gmt.*$/i, '').trim();
       const parsed = parseDateString(raw);
+      if (parsed.start) matches.push(parsed);
+    }
+  }
+
+  // Plain time only (with contextual scan)
+  const timeOnly = text.match(/\b\d{1,2}(:\d{2})?\s*(am|pm)\b/gi) || [];
+  for (const rawTime of timeOnly) {
+    const index = text.indexOf(rawTime);
+    const before = text.slice(Math.max(0, index - 60), index);
+    const dateHint = before.match(/\b(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?)\b/i);
+    if (dateHint) {
+      const combined = `${dateHint[0]} ${rawTime}`;
+      const parsed = parseDateString(combined);
       if (parsed.start) matches.push(parsed);
     }
   }
@@ -103,35 +140,46 @@ function findDates(text) {
   return matches;
 }
 
-
-// ✅ Parse strings into JS Date
-function parseDateString(dateStr) {
-  const raw = dateStr.trim();
+// 📍 Parse natural date string using Moment.js
+function parseDateString(raw) {
   try {
-    let normalized = raw
+    let input = raw
       .replace(/(st|nd|rd|th)/gi, '')
       .replace(/,\s*/g, ' ')
       .replace(/\s*at\s*/gi, ' ')
+      .replace(/–|—/g, '-') // normalize dash
       .replace(/\s+/g, ' ')
-      .replace(/(\d)(am|pm)/gi, '$1 $2');
+      .replace(/(\d)(am|pm)/gi, '$1 $2')
+      .trim();
 
-    if (!/\d{4}/.test(normalized)) {
-      normalized += ' ' + new Date().getFullYear();
-    }
+    if (!/\d{4}/.test(input)) input += ' ' + new Date().getFullYear();
 
-    const parsedDate = new Date(normalized + ' GMT+0530');
+    const momentDate = Moment.moment(input, [
+      "D MMM YYYY h:mm A",
+      "MMM D YYYY h:mm A",
+      "D MMM h:mm A",
+      "MMM D h:mm A",
+      "DD-MM-YYYY h:mm A",
+      "DD/MM/YYYY h:mm A",
+      "DD-MM-YYYY",
+      "YYYY-MM-DDTHH:mm:ss",
+      "YYYY-MM-DD HH:mm",
+      "h:mm A",
+      "h:mm"
+    ], true);
+
     return {
       raw,
-      start: isNaN(parsedDate.getTime()) ? null : parsedDate,
-      isAllDay: false
+      start: momentDate.isValid() ? momentDate.toDate() : null,
+      isAllDay: !/\d{1,2}:\d{2}/.test(input),
+      duration: 60
     };
   } catch {
     return { raw, start: null };
   }
 }
 
-
-// ✅ Check if similar event already exists
+// 📍 Check for duplicate event
 function eventExists(calendar, title, start) {
   const windowStart = new Date(start.getTime() - 30 * 60000);
   const windowEnd = new Date(start.getTime() + 30 * 60000);
